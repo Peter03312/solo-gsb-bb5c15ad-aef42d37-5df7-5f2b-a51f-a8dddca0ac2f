@@ -49,6 +49,7 @@ export function App() {
       onHome={() => setRoute({ name: 'home' })}
       onOpenEdition={(no) => setRoute({ name: 'edition', id: route.id, no })}
       onOpenDiff={(no) => setRoute({ name: 'diff', id: route.id, no })}
+      onOpenDocument={(id) => setRoute({ name: 'doc', id })}
     />
   );
 }

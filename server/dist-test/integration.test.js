@@ -1701,6 +1701,190 @@ async function main() {
         })).json;
         assert.strictEqual(bep.lines.find((l) => l.lineId === beC3).newContent, '𫬺𰻞𠀀B', '按码点替换第 3 个字（代理对安全）');
         assert.strictEqual(bep.lines.find((l) => l.lineId === beC3).oldLengthCp, 4);
+        // ================== 可迁移归档：导出 / 导入 ==================
+        const missingArchiveRes = await fetch(`${base}/documents/99999999/archive`);
+        assert.strictEqual(missingArchiveRes.status, 404, '导出不存在的文献 → 404');
+        const docCount = async () => (await call(base, 'GET', '/documents')).json.documents.length;
+        const docsBeforeArchive = await docCount();
+        // ---- 建档：两份抄本、两组、发布第 1 版，再缩行使第 2 组待修复 ----
+        r = await call(base, 'POST', '/documents', {
+            title: '归档测试文献',
+            manuscripts: ['归档甲', '归档乙'],
+        });
+        assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+        const arcSrcId = r.json.id;
+        let arcView = (await call(base, 'GET', `/documents/${arcSrcId}`)).json;
+        const arcA = arcView.manuscripts[0];
+        const arcB = arcView.manuscripts[1];
+        let arcVer = arcView.document.version;
+        r = await call(base, 'POST', `/manuscripts/${arcA.id}/lines`, { expectedVersion: arcVer, content: '天命之謂性率性之謂道' });
+        assert.strictEqual(r.status, 201);
+        r = await call(base, 'POST', `/manuscripts/${arcB.id}/lines`, { expectedVersion: arcVer + 1, content: '天命之謂性率性之謂道' });
+        assert.strictEqual(r.status, 201);
+        arcView = (await call(base, 'GET', `/documents/${arcSrcId}`)).json;
+        arcVer = arcView.document.version;
+        const arcA1 = arcView.rawByMs.find((x) => x.msId === arcA.id).lines[0].lineId;
+        const arcB1 = arcView.rawByMs.find((x) => x.msId === arcB.id).lines[0].lineId;
+        r = await call(base, 'PUT', `/documents/${arcSrcId}/groups`, {
+            expectedVersion: arcVer,
+            groups: [
+                { ord: 1, fragments: [
+                        { msId: arcA.id, lineId: arcA1, startCp: 0, endCp: 5 },
+                        { msId: arcB.id, lineId: arcB1, startCp: 0, endCp: 5 },
+                    ] },
+                { ord: 2, fragments: [
+                        { msId: arcA.id, lineId: arcA1, startCp: 5, endCp: 10 },
+                        { msId: arcB.id, lineId: arcB1, startCp: 5, endCp: 10 },
+                    ] },
+            ],
+        });
+        assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+        arcView = (await call(base, 'GET', `/documents/${arcSrcId}`)).json;
+        arcVer = arcView.document.version;
+        r = await call(base, 'POST', `/documents/${arcSrcId}/publish`, { expectedVersion: arcVer });
+        assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+        // 缩行：删掉甲本行1后五字 → 第 2 组甲片段 [5,10) 越界，组待修复，坐标保留
+        arcView = (await call(base, 'GET', `/documents/${arcSrcId}`)).json;
+        arcVer = arcView.document.version;
+        r = await call(base, 'PUT', `/lines/${arcA1}`, {
+            expectedVersion: arcVer, startCp: 5, endCp: 10, replacement: '',
+        });
+        assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+        arcView = (await call(base, 'GET', `/documents/${arcSrcId}`)).json;
+        const srcVersion = arcView.document.version;
+        assert.strictEqual(arcView.stats.brokenCount, 1);
+        const srcBrokenG = arcView.groups.find((g) => g.ord === 2);
+        assert.strictEqual(srcBrokenG.broken, true);
+        // ---- 导出：同一已提交版本、带格式版本、含待修复坐标与全部快照 ----
+        const expRes = await fetch(`${base}/documents/${arcSrcId}/archive`);
+        assert.strictEqual(expRes.status, 200);
+        assert.ok(expRes.headers.get('content-disposition').includes('.archive.json'));
+        const archive = JSON.parse(await expRes.text());
+        assert.strictEqual(archive.format, 'collation-archive');
+        assert.strictEqual(archive.formatVersion, 1);
+        assert.strictEqual(archive.source.documentId, arcSrcId);
+        assert.strictEqual(archive.source.title, '归档测试文献');
+        assert.strictEqual(archive.source.version, srcVersion);
+        assert.strictEqual(archive.source.publishedVer, 1);
+        assert.strictEqual(archive.manuscripts.length, 2);
+        assert.strictEqual(archive.lines.length, 2);
+        // 片段以抄本身份 + 行号定位（不含库内行 id）
+        const arcG2 = archive.groups.find((g) => g.ord === 2);
+        assert.strictEqual(arcG2.broken, true);
+        const arcG2a = arcG2.fragments.find((f) => f.msId === arcA.id);
+        assert.strictEqual(arcG2a.lineNo, 1);
+        assert.strictEqual(arcG2a.startCp, 5);
+        assert.strictEqual(arcG2a.endCp, 10, '待修复组保留原有越界坐标');
+        assert.strictEqual(archive.editions.length, 1);
+        assert.strictEqual(archive.editions[0].editionNo, 1);
+        // ---- 导入：成功创建独立新文献，内部标识全部重建 ----
+        r = await call(base, 'POST', '/documents/import', archive);
+        assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+        const newId = r.json.documentId;
+        assert.notStrictEqual(newId, arcSrcId);
+        assert.strictEqual(r.json.imported.groupCount, 2);
+        assert.strictEqual(r.json.imported.brokenCount, 1);
+        assert.strictEqual(r.json.imported.editionCount, 1);
+        assert.strictEqual(await docCount(), docsBeforeArchive + 2, '源文献 + 导入文献');
+        let newView = (await call(base, 'GET', `/documents/${newId}`)).json;
+        assert.strictEqual(newView.document.title, '归档测试文献');
+        assert.strictEqual(newView.document.publishedVer, 1);
+        assert.strictEqual(newView.document.version, 1, '新文献从 v1 开始');
+        assert.strictEqual(newView.stats.groupCount, 2);
+        assert.strictEqual(newView.stats.brokenCount, 1);
+        const newA = newView.manuscripts.find((m) => m.name === '归档甲');
+        const newB = newView.manuscripts.find((m) => m.name === '归档乙');
+        assert.ok(newA.isBase);
+        assert.notStrictEqual(newA.id, arcA.id, '行/抄本内部标识由新库分配');
+        const arcNewA1 = newView.rawByMs.find((x) => x.msId === newA.id).lines[0];
+        const arcNewB1 = newView.rawByMs.find((x) => x.msId === newB.id).lines[0];
+        assert.strictEqual(arcNewA1.content, '天命之謂性');
+        assert.strictEqual(arcNewB1.content, '天命之謂性率性之謂道');
+        const newG2 = newView.groups.find((g) => g.ord === 2);
+        assert.strictEqual(newG2.broken, true);
+        const newG2aCell = newG2.cells.find((c) => c.msId === newA.id);
+        assert.strictEqual(newG2aCell.lineNo, 1);
+        assert.strictEqual(newG2aCell.startCp, 5);
+        assert.strictEqual(newG2aCell.endCp, 10, '越界坐标原样保留');
+        assert.strictEqual(newG2aCell.oobEnd, 5);
+        // ---- 旧版仍可阅读，且快照内部标识已重写到新文献 ----
+        r = await call(base, 'GET', `/documents/${newId}/editions`);
+        assert.strictEqual(r.json.editions.length, 1);
+        r = await call(base, 'GET', `/documents/${newId}/editions/1`);
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(r.json.view.document.id, newId);
+        assert.ok(r.json.view.manuscripts.some((m) => m.id === newA.id));
+        assert.ok(!r.json.view.manuscripts.some((m) => m.id === arcA.id), '快照内部抄本 id 已重建');
+        // 旧版与当前工作版可对照（不凭 id 配对，应正常返回）
+        r = await call(base, 'GET', `/documents/${newId}/editions/1/diff`);
+        assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+        // ---- 发布门禁：待修复时 409；修复 + 改字后可继续编辑发布 ----
+        r = await call(base, 'POST', `/documents/${newId}/publish`, { expectedVersion: newView.document.version });
+        await expectFail(r, 409, '待修复');
+        // 把甲本行1恢复为十字（在第 5 字处插回），越界片段平移后仍待修复
+        r = await call(base, 'PUT', `/lines/${arcNewA1.lineId}`, {
+            expectedVersion: newView.document.version, startCp: 5, endCp: 5, replacement: '率性之謂道',
+        });
+        assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+        newView = (await call(base, 'GET', `/documents/${newId}`)).json;
+        const newG2Id = newView.groups.find((g) => g.ord === 2).id;
+        const curA1 = newView.rawByMs.find((x) => x.msId === newA.id).lines[0].lineId;
+        const curB1 = newView.rawByMs.find((x) => x.msId === newB.id).lines[0].lineId;
+        r = await call(base, 'PUT', `/documents/${newId}/groups/${newG2Id}/repair`, {
+            expectedVersion: newView.document.version,
+            group: { ord: 2, fragments: [
+                    { msId: newA.id, lineId: curA1, startCp: 5, endCp: 10 },
+                    { msId: newB.id, lineId: curB1, startCp: 5, endCp: 10 },
+                ] },
+        });
+        assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+        newView = (await call(base, 'GET', `/documents/${newId}`)).json;
+        assert.strictEqual(newView.stats.brokenCount, 0);
+        r = await call(base, 'POST', `/documents/${newId}/publish`, { expectedVersion: newView.document.version });
+        assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+        assert.strictEqual(r.json.editionNo, 2, '新文献按现有门禁继续发布');
+        // ---- 源文献不被导入改动 ----
+        const srcAfter = (await call(base, 'GET', `/documents/${arcSrcId}`)).json;
+        assert.strictEqual(srcAfter.document.version, srcVersion);
+        assert.strictEqual(srcAfter.stats.brokenCount, 1);
+        assert.strictEqual(srcAfter.document.publishedVer, 1);
+        // ---- 同一文件重复导入：再创建一篇独立文献 ----
+        r = await call(base, 'POST', '/documents/import', archive);
+        assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+        const newId2 = r.json.documentId;
+        assert.notStrictEqual(newId2, newId);
+        assert.notStrictEqual(newId2, arcSrcId);
+        assert.strictEqual(await docCount(), docsBeforeArchive + 3);
+        // ---- 非法归档：逐条可定位、整次拒绝、不创建任何文献 ----
+        const countBeforeBad = await docCount();
+        const expectReject = async (mut, phrase, code) => {
+            const bad = JSON.parse(JSON.stringify(archive));
+            mut(bad);
+            const rr = await call(base, 'POST', '/documents/import', bad);
+            await expectFail(rr, 400, phrase);
+            assert.strictEqual(rr.json.details.code, 'ARCHIVE_INVALID');
+            assert.ok(Array.isArray(rr.json.details.issues) && rr.json.details.issues.length > 0);
+            if (code)
+                assert.ok(rr.json.details.issues.some((i) => i.code === code), JSON.stringify(rr.json));
+            assert.ok(rr.json.details.issues.every((i) => typeof i.message === 'string' && i.path));
+        };
+        await expectReject((a) => { a.format = 'unknown'; }, '无法识别的归档格式', 'ARCHIVE_FORMAT');
+        await expectReject((a) => { a.formatVersion = 99; }, '不支持的归档格式版本', 'ARCHIVE_FORMAT');
+        await expectReject((a) => { a.groups.find((g) => g.ord === 1).fragments.find((f) => f.msId === arcB.id).msId = 999999; }, '不存在的抄本', 'ARCHIVE_DANGLING_REF');
+        await expectReject((a) => { a.groups.find((g) => g.ord === 1).fragments.find((f) => f.msId === arcB.id).lineNo = 99; }, '悬空引用', 'ARCHIVE_DANGLING_REF');
+        await expectReject((a) => { const f = a.groups.find((g) => g.ord === 2).fragments.find((x) => x.msId === arcA.id); f.startCp = -1; }, '区间非法', 'ARCHIVE_BAD_RANGE');
+        await expectReject((a) => { const f = a.groups.find((g) => g.ord === 2).fragments.find((x) => x.msId === arcA.id); f.startCp = 7; f.endCp = 7; }, '区间非法', 'ARCHIVE_BAD_RANGE');
+        // 完好组非法区间（越界）：第 1 组乙片段越出当前行
+        await expectReject((a) => { const f = a.groups.find((g) => g.ord === 1).fragments.find((x) => x.msId === arcB.id); f.endCp = 99; }, '越界', 'OUT_OF_RANGE');
+        // 损坏快照：缩短快照内乙本行1 → 第 2 组片段越界，快照不能构成合法归组
+        await expectReject((a) => {
+            const raw = a.editions[0].snapshot.rawByMs.find((x) => x.msId === arcB.id);
+            raw.lines[0].content = '天命之謂性';
+        }, '无法构成合法归组', 'ARCHIVE_CORRUPT_SNAPSHOT');
+        assert.strictEqual(await docCount(), countBeforeBad, '全部拒绝均不得创建文献');
+        // 根节点不是对象 / 非法 JSON
+        r = await call(base, 'POST', '/documents/import', ['not', 'an', 'object']);
+        await expectFail(r, 400, '根节点必须是 JSON 对象');
         console.log('✅ 全部集成测试通过');
     }
     finally {

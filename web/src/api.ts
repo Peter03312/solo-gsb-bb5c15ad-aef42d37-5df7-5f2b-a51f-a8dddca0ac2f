@@ -108,9 +108,18 @@ export const api = {
       edits,
       basis,
     }),
+  /** 导入可迁移归档（请求体即归档 JSON 本体）；失败抛 ApiError，details.issues 可逐条定位。 */
+  importArchive: (archive: unknown) =>
+    req<ArchiveImportResult>('POST', '/api/documents/import', archive),
 };
 
+/** 导出归档的下载地址（GET 附件，直接用 <a download> / window.open 即可）。 */
+export function exportArchiveUrl(id: number): string {
+  return `/api/documents/${id}/archive`;
+}
+
 import type {
+  ArchiveImportResult,
   BatchEditItem,
   BatchEditPreview,
   BatchEditResult,

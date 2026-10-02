@@ -415,3 +415,27 @@ export interface RestoreResult {
     baseMsId: number;
   };
 }
+
+// ---- 可迁移归档：导出 / 导入 ----
+
+export interface ArchiveImportStats {
+  manuscriptCount: number;
+  lineCount: number;
+  groupCount: number;
+  brokenCount: number;
+  fragmentCount: number;
+  missingCount: number;
+  editionCount: number;
+}
+
+export interface ArchiveImportResult {
+  ok: boolean;
+  documentId: number;
+  title: string;
+  source: {
+    documentId: number;
+    version: number;
+    exportedAt: string | null;
+  };
+  imported: ArchiveImportStats;
+}

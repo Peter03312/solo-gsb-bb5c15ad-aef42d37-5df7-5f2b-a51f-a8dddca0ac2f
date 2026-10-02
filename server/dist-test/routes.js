@@ -10,6 +10,7 @@ const supplement_1 = require("./supplement");
 const reline_1 = require("./reline");
 const batchedit_1 = require("./batchedit");
 const restore_1 = require("./restore");
+const archive_1 = require("./archive");
 const util_1 = require("./util");
 const repo_1 = require("./repo");
 exports.router = (0, express_1.Router)();
@@ -626,4 +627,50 @@ exports.router.post('/documents/:id/editions/:no/restore', wrap(async (req, res)
         };
     });
     res.json({ ok: true, ...result });
+}));
+// ---------- 可迁移归档：导出 / 导入 ----------
+/**
+ * 导出为可迁移归档（只读，不推进版本）：
+ *   GET /api/documents/:id/archive
+ * 在单个 SERIALIZABLE 事务内取「同一已提交版本」：标题、抄本及行序、底本、当前对应组的片段、
+ * 缺文与待修复状态、工作版版本号和全部已发布版快照；文件带格式标识 format/formatVersion。
+ * 响应为附件 JSON 下载。尚未选定底本 → 400；文献不存在 → 404。
+ */
+exports.router.get('/documents/:id/archive', wrap(async (req, res) => {
+    const id = Number(req.params.id);
+    const archive = await (0, db_1.withTx)(async (c) => (0, archive_1.buildArchive)(c, id));
+    const body = JSON.stringify(archive, null, 2);
+    const filename = encodeURIComponent(`${(0, archive_1.safeFileName)(archive.source.title)}-v${archive.source.version}.archive.json`);
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${filename}`);
+    res.send(body);
+}));
+/**
+ * 从归档导入为一篇全新的、与源文献互相独立的文献：
+ *   POST /api/documents/import   （请求体即归档 JSON 本体）
+ * 单次事务内完成格式与引用关系校验后整批落库：
+ *  - 完好组按现行归组规则全量校验；待修复组可保留越界坐标，但真实片段不得负值 / 逆序 / 零长度 / 悬空引用；
+ *  - 每个发布版快照都必须能构成合法归组；
+ *  - 文献 / 抄本（稳定身份沿用归档 id）/ 行 / 组及快照内部标识全部重建关联。
+ * 未知格式、缺失引用、损坏快照或完好组非法区间 → 400 ARCHIVE_INVALID，
+ * details.issues[] 逐条给出 code/message 与可定位 path（组序 / 抄本 / 行号 / 发布版号）。
+ * 同一文件可重复导入，每次各自创建独立文献。导入创建新文献，不需要 expectedVersion。
+ */
+exports.router.post('/documents/import', wrap(async (req, res) => {
+    const archive = req.body;
+    const plan = (0, archive_1.parseArchive)(archive); // 纯函数校验；任何问题抛 400 ARCHIVE_INVALID
+    const result = await (0, db_1.withTx)(async (c) => {
+        const newDocId = await (0, archive_1.applyImport)(c, plan);
+        return {
+            documentId: newDocId,
+            title: plan.title,
+            source: {
+                documentId: plan.source.documentId,
+                version: plan.source.version,
+                exportedAt: archive.exportedAt ?? null,
+            },
+            imported: plan.stats,
+        };
+    });
+    res.status(201).json({ ok: true, ...result });
 }));

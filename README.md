@@ -355,10 +355,80 @@ curl -X POST http://localhost:4000/api/documents/1/editions/1/restore \
 ```
 
 
+### 可迁移归档（导出一篇文献 / 导入为另一篇文献）
+整理者可在工作区「归档迁移」页签（也可直接调 HTTP API）把一篇文献下载为**自描述、可跨库迁移**
+的 JSON 归档，并把同一归档导入为一篇**全新的、互相独立**的文献。
+
+- **导出取同一已提交版本**：在单个 `SERIALIZABLE` 事务中读取，工作版与全部快照绝不会半新半旧。
+  归档包含：文献**标题**、**抄本及原始行序与文字**、**底本**、**当前对应组的全部片段**
+  （以「抄本稳定身份 id + 抄本内原始行号 + 码点区间」定位，与库内行/组 id 无关）、
+  **缺文标记与待修复状态**（待修复组保留原有越界坐标以便追溯）、**工作版版本号**
+  与 **全部已发布版快照**；文件头带格式标识 `format:"collation-archive"` 与
+  `formatVersion:1`。尚未选定底本 → 400；文献不存在 → 404。导出是只读操作。
+- **导入在单次事务中校验格式与引用关系，整批通过才落库**：
+  - **当前完好组**按**现行归组规则**全量校验（底本唯一、每抄本每组至多一片、行内不重叠、不越界、组序连续）；
+  - **待修复组可保留原有越界坐标**，但真实片段不得有**负值、逆序（end≤start）、零长度或悬空引用**
+    （引用的抄本/行必须在归档内真实存在）；完好片段与待修复片段在同一行的现存可见区间也不得重叠；
+  - **每个发布版快照都必须能独立构成合法归组**（复用「恢复已发布版」同一套快照校验：结构、底本、
+    片段越界、行内重叠、片段文字与原文区间一致等）；
+  - **重建内部标识及关联**：新文献取得新 id；抄本沿用归档中的跨版本稳定身份 id（与目标库已有文献互不影响）；
+    行与组全部取得当前有效新标识；每个已发布快照**内部**的文献 id、抄本/行/组 id 一并重写以保持内部关联；
+    新文献工作版版本号从 **v1** 起、`published_ver` 等于迁入快照数。
+  - **未知格式 / 不支持的格式版本、缺失引用、损坏快照、完好组非法区间** → **400**
+    `details.code=ARCHIVE_INVALID`、`details.issues[]` 逐条给出 `code/message` 与**可定位 `path`**
+    （如 `groups[2].fragments[0].lineNo`、`editions[1].snapshot…`，并带组序/抄本名/行号/发布版号），
+    **整次拒绝、不创建任何文献**。
+- **导入语义**：导入成功**不改动源文献**（导出本身只读）；新文献的**旧版仍可阅读、对照、恢复**，
+  新文献本身**仍可编辑**（录文/归组/修复/行界/补配/批量改字）并**按现有门禁发布**（有待修复组则 409）；
+  **同一归档文件重复导入各自创建独立文献**，互不影响。
+
+接口与调用示例：
+
+```bash
+# 导出（只读；响应为附件 JSON，文件名形如「中庸-v12.archive.json」）
+curl -OJ http://localhost:4000/api/documents/1/archive
+
+# 导入为新文献（请求体即归档 JSON 本体；无需 expectedVersion——创建的是新文献）
+curl -X POST http://localhost:4000/api/documents/import \
+  -H 'Content-Type: application/json' \
+  --data-binary @中庸-v12.archive.json
+```
+
+成功返回：
+
+```json
+{
+  "ok": true,
+  "documentId": 42,
+  "title": "中庸",
+  "source": { "documentId": 1, "version": 12, "exportedAt": "2026-10-02T08:30:00.000Z" },
+  "imported": {
+    "manuscriptCount": 3, "lineCount": 18, "groupCount": 12, "brokenCount": 1,
+    "fragmentCount": 33, "missingCount": 2, "editionCount": 2
+  }
+}
+```
+
+校验失败响应（整次拒绝）：
+
+```json
+{
+  "error": "归档无法导入：共 1 处问题；已整次拒绝，未创建任何文献",
+  "details": {
+    "code": "ARCHIVE_INVALID",
+    "issues": [
+      { "code": "ARCHIVE_DANGLING_REF", "message": "第 2 组「乙本」引用了不存在的第 99 行（悬空引用）",
+        "path": "groups[1].fragments[1].lineNo", "groupOrd": 2, "msName": "乙本", "lineNo": 99 }
+    ]
+  }
+}
+```
+
 ### 并发控制
 - 所有写请求必须携带 `expectedVersion`（乐观锁）；
 - 基于过期版本的修改返回 **409 拒绝**，不做任何写入，前端提示刷新后重试；
 - 事务隔离级别为 `SERIALIZABLE`，序列化冲突同样返回 409。
+- 例外：`POST /api/documents/import` 创建的是全新文献、不依赖任何既有版本，故不需要 `expectedVersion`。
 
 ---
 
@@ -386,6 +456,8 @@ curl -X POST http://localhost:4000/api/documents/1/editions/1/restore \
 | GET | `/api/documents/:id/editions` / `…/editions/:no` | 版本列表 / 阅读旧版快照 |
 | GET | `/api/documents/:id/editions/:no/diff` | **该已发布版与当前工作版的版本对照**（旧版不存在 → 404） |
 | POST | `/api/documents/:id/editions/:no/restore` | **确认恢复为该已发布版**（整体重建抄本/底本/行/组片段/缺文；版本过期 409、版不存在 404、快照不合法 409 `RESTORE_SNAPSHOT_INVALID`，皆不改动数据；成功只推进一次版本） |
+| GET | `/api/documents/:id/archive` | **导出可迁移归档**（只读附件 JSON：标题/抄本与行序/底本/当前组片段/缺文与待修复/工作版版本号/全部已发布快照，带 `format`+`formatVersion`） |
+| POST | `/api/documents/import` | **从归档导入为全新独立文献**（请求体即归档；完好组按现行规则、待修复组保留越界但禁负值/逆序/零长/悬空、每个快照须合法；未知格式/缺失引用/损坏快照/完好组非法区间 → 400 `ARCHIVE_INVALID` 带可定位 `path`，整次拒绝；可重复导入） |
 
 写请求体均含 `expectedVersion`；错误响应：`{ "error": "...", "details": [ { "code", "message", "groupOrd", "msName", "lineNo", ... } ] }`。
 
@@ -428,7 +500,12 @@ npm test
 非法区间/跨文献行整批报错定位（BAD_RANGE/OVERLAPPING_RANGES/DUPLICATE_INSERTION/
 INSERTION_POINT_IN_INTERVAL/LINE_NOT_IN_DOC/BAD_SHAPE）、非零长编辑端点相接允许、
 行或文献不存在 404、缺 basis 400、过期版本 409 与 basis 不符 409（BATCH_EDIT_STALE）皆整批拒绝不写入不推进、
-成功只推进一次版本、已发布快照保持原样、扩展 B 区生僻字按码点替换**。
+成功只推进一次版本、已发布快照保持原样、扩展 B 区生僻字按码点替换**，以及
+**可迁移归档：导出取同一已提交版本（含标题/抄本行序/底本/当前组片段/缺文/待修复越界坐标/工作版版本号/全部快照与格式版本）、
+导入重建独立文献且内部标识（含快照内部）全部重建、待修复组保留越界坐标、新文献 v1 起步且旧版可读可对照可恢复、
+新文献待修复时发布 409、修复改字后可继续发布、源文献不被导入改动、同一文件重复导入各自独立、
+未知格式/格式版本不符/缺失抄本与悬空行引用/负值逆序零长度/完好组越界/损坏快照均 400 ARCHIVE_INVALID
+带可定位 path 且整次拒绝不建文献、根节点非对象与非法 JSON 400、导出附件头与文献不存在 404**。
 
 ---
 
@@ -440,7 +517,7 @@ INSERTION_POINT_IN_INTERVAL/LINE_NOT_IN_DOC/BAD_SHAPE）、非零长编辑端点
 ├── docker-compose.yml        # 一键：db(PostgreSQL 16) + app
 ├── db/schema.sql             # 数据库结构（幂等，可重复执行）
 ├── server/                   # Node.js + TypeScript + Express
-│   └── src/ (db/validate/collation/diff/supplement/reline/restore/routes/repo/...)
+│   └── src/ (db/validate/collation/diff/supplement/reline/restore/archive/routes/repo/...)
 └── web/                      # React 18 + Vite + TypeScript
     └── src/ (录文 / 归组 / 对照 / 发布与旧版 / 版本对照)
 ```
