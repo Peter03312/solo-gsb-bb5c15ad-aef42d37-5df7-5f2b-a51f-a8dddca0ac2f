@@ -1848,6 +1848,343 @@ async function main() {
     assert.strictEqual(bep.lines.find((l: any) => l.lineId === beC3).newContent, '𫬺𰻞𠀀B', '按码点替换第 3 个字（代理对安全）');
     assert.strictEqual(bep.lines.find((l: any) => l.lineId === beC3).oldLengthCp, 4);
 
+    // ---------- 文献归档：导出 / 导入 ----------
+    // 独立文献：三抄本、三组（含缺文），发布第 1 版后改短底本行制造两个待修复组（其一越界）
+    r = await call(base, 'POST', '/documents', { title: `归档测试 ${++seq}`, manuscripts: ['甲本', '乙本', '丙本'] });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+    const dArc = r.json.id;
+    let arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    const [arcA, arcB, arcC] = arcView.manuscripts;
+    await call(base, 'POST', `/manuscripts/${arcA.id}/lines`, { expectedVersion: arcView.document.version, content: '天命之謂性率性之謂道' });
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    await call(base, 'POST', `/manuscripts/${arcA.id}/lines`, { expectedVersion: arcView.document.version, content: '修道之謂教' });
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    await call(base, 'POST', `/manuscripts/${arcB.id}/lines`, { expectedVersion: arcView.document.version, content: '天命之謂姓率性之謂道' });
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    await call(base, 'POST', `/manuscripts/${arcB.id}/lines`, { expectedVersion: arcView.document.version, content: '修道之謂教' });
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    await call(base, 'POST', `/manuscripts/${arcC.id}/lines`, { expectedVersion: arcView.document.version, content: '天命之謂性' });
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    await call(base, 'POST', `/manuscripts/${arcC.id}/lines`, { expectedVersion: arcView.document.version, content: '修道之謂教' });
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    const arcLines = (msId: number, v: any) => v.rawByMs.find((x: any) => x.msId === msId).lines;
+    const arcA1 = arcLines(arcA.id, arcView)[0].lineId;
+    const arcA2 = arcLines(arcA.id, arcView)[1].lineId;
+    const arcB1 = arcLines(arcB.id, arcView)[0].lineId;
+    const arcB2 = arcLines(arcB.id, arcView)[1].lineId;
+    const arcC1 = arcLines(arcC.id, arcView)[0].lineId;
+    const arcC2 = arcLines(arcC.id, arcView)[1].lineId;
+    r = await call(base, 'PUT', `/documents/${dArc}/groups`, {
+      expectedVersion: arcView.document.version,
+      groups: [
+        { ord: 1, fragments: [
+          { msId: arcA.id, lineId: arcA1, startCp: 0, endCp: 5 },
+          { msId: arcB.id, lineId: arcB1, startCp: 0, endCp: 5 },
+          { msId: arcC.id, lineId: arcC1, startCp: 0, endCp: 5 },
+        ]},
+        { ord: 2, fragments: [
+          { msId: arcA.id, lineId: arcA1, startCp: 5, endCp: 10 },
+          { msId: arcB.id, lineId: arcB1, startCp: 5, endCp: 10 },
+          { msId: arcC.id, missing: true },
+        ]},
+        { ord: 3, fragments: [
+          { msId: arcA.id, lineId: arcA2, startCp: 0, endCp: 5 },
+          { msId: arcB.id, lineId: arcB2, startCp: 0, endCp: 5 },
+          { msId: arcC.id, lineId: arcC2, startCp: 0, endCp: 5 },
+        ]},
+      ],
+    });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    r = await call(base, 'POST', `/documents/${dArc}/publish`, { expectedVersion: arcView.document.version });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+    assert.strictEqual(r.json.editionNo, 1);
+    // 改短底本行1（10 字 → 5 字）：组1 相交待修复（坐标仍在行内），组2 越界待修复（坐标保留）
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    r = await call(base, 'PUT', `/lines/${arcA1}`, {
+      expectedVersion: arcView.document.version,
+      startCp: 0, endCp: 10, replacement: '天命之謂性',
+    });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    assert.strictEqual(arcView.stats.brokenCount, 2, '组1、组2 待修复');
+    const arcVersion = arcView.document.version;
+
+    // ---- 导出：格式 / 内容 / 同一已提交版本 ----
+    r = await call(base, 'GET', `/documents/${dArc}/archive`);
+    assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+    const arc = r.json;
+    assert.strictEqual(arc.format, 'collation-archive', '归档带格式标识');
+    assert.strictEqual(arc.formatVersion, 1, '归档带格式版本');
+    assert.ok(typeof arc.exportedAt === 'string' && arc.exportedAt.length > 0);
+    assert.strictEqual(arc.document.title, `归档测试 ${seq}`);
+    assert.strictEqual(arc.document.version, arcVersion, '归档含导出时工作版版本号');
+    assert.strictEqual(arc.document.publishedVer, 1);
+    assert.strictEqual(arc.document.baseMsRef, arcA.id, '底本引用');
+    assert.strictEqual(arc.manuscripts.length, 3);
+    assert.deepStrictEqual(arc.manuscripts.map((m: any) => m.position), [1, 2, 3], '抄本及顺序');
+    assert.strictEqual(arc.lines.length, 6);
+    assert.strictEqual(arc.groups.length, 3);
+    assert.strictEqual(arc.groups[0].broken, true, '待修复状态入档');
+    assert.strictEqual(arc.groups[1].broken, true);
+    assert.strictEqual(arc.groups[2].broken, false);
+    const arcG2Base = arc.groups[1].fragments.find((f: any) => f.msRef === arcA.id);
+    assert.deepStrictEqual([arcG2Base.startCp, arcG2Base.endCp], [5, 10], '待修复组越界坐标原样入档');
+    assert.strictEqual(arc.groups[1].fragments.find((f: any) => f.msRef === arcC.id).missing, true, '缺文标记入档');
+    assert.strictEqual(arc.editions.length, 1, '全部已发布版快照入档');
+    assert.strictEqual(arc.editions[0].editionNo, 1);
+    assert.strictEqual(arc.editions[0].snapshot.groups.length, 3);
+    // 导出只读：不推进版本
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    assert.strictEqual(arcView.document.version, arcVersion, '导出不得推进版本');
+    // 再导出一次：除导出时刻外逐字节一致（同一已提交版本的确定性内容）
+    const arcAgain = (await call(base, 'GET', `/documents/${dArc}/archive`)).json;
+    assert.deepStrictEqual(
+      { ...arcAgain, exportedAt: null },
+      { ...arc, exportedAt: null },
+      '未改动时重复导出内容一致'
+    );
+
+    // ---- 导入：创建独立新文献，内部标识全部重建 ----
+    r = await call(base, 'POST', '/documents/import', arc);
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+    const dImp = r.json.documentId;
+    assert.notStrictEqual(dImp, dArc);
+    assert.strictEqual(r.json.title, `归档测试 ${seq}`);
+    assert.strictEqual(r.json.version, arcVersion, '工作版版本号随归档重建');
+    assert.strictEqual(r.json.publishedVer, 1);
+    assert.deepStrictEqual(r.json.imported, {
+      manuscriptCount: 3, lineCount: 6, groupCount: 3,
+      brokenGroupCount: 2, fragmentCount: 9, missingCount: 1, editionCount: 1,
+    });
+    let impView = (await call(base, 'GET', `/documents/${dImp}`)).json;
+    assert.strictEqual(impView.document.version, arcVersion);
+    assert.strictEqual(impView.document.publishedVer, 1);
+    const [impA, impB, impC] = impView.manuscripts;
+    assert.strictEqual(impA.name, '甲本');
+    assert.ok(impA.isBase, '底本随归档重建');
+    assert.ok(impA.id !== arcA.id && impB.id !== arcB.id && impC.id !== arcC.id, '抄本取得新标识');
+    const impLines = (msId: number) => impView.rawByMs.find((x: any) => x.msId === msId).lines;
+    assert.strictEqual(impLines(impA.id)[0].content, '天命之謂性', '行序与文字不变');
+    assert.strictEqual(impLines(impA.id)[1].content, '修道之謂教');
+    assert.strictEqual(impLines(impB.id)[0].content, '天命之謂姓率性之謂道');
+    assert.strictEqual(impView.stats.groupCount, 3);
+    assert.strictEqual(impView.stats.brokenCount, 2, '待修复状态保留');
+    const impG2 = impView.groups.find((g: any) => g.ord === 2);
+    const impG2Base = impG2.cells.find((c: any) => c.msId === impA.id);
+    assert.deepStrictEqual([impG2Base.startCp, impG2Base.endCp], [5, 10], '待修复组越界坐标保留');
+    assert.strictEqual(impG2Base.oobEnd, 5, '越界前可见部分标识一致');
+    assert.strictEqual(impG2.cells.find((c: any) => c.msId === impC.id).missing, true, '缺文状态保留');
+    const impG3 = impView.groups.find((g: any) => g.ord === 3);
+    assert.strictEqual(impG3.broken, false);
+    assert.strictEqual(impG3.baseText, '修道之謂教');
+    // 旧版仍可阅读：快照内标识已重建为新文献的 id
+    const impEditions = (await call(base, 'GET', `/documents/${dImp}/editions`)).json;
+    assert.strictEqual(impEditions.editions.length, 1);
+    const impEd1 = (await call(base, 'GET', `/documents/${dImp}/editions/1`)).json;
+    assert.strictEqual(impEd1.view.document.id, dImp, '快照文献 id 已重建');
+    assert.strictEqual(impEd1.view.document.baseMsId, impA.id, '快照底本引用已重建');
+    assert.deepStrictEqual(
+      impEd1.view.manuscripts.map((m: any) => m.id).sort((x: number, y: number) => x - y),
+      [impA.id, impB.id, impC.id].sort((x, y) => x - y),
+      '快照抄本引用已重建为新标识'
+    );
+    assert.strictEqual(impEd1.view.groups[0].baseText, '天命之謂性');
+    // 旧版仍可对照：快照与工作版按新标识配对
+    const impDiff = (await call(base, 'GET', `/documents/${dImp}/editions/1/diff`)).json;
+    assert.strictEqual(impDiff.baseSame, true);
+    assert.ok(impDiff.manuscripts.every((m: any) => m.inOld && m.inNew), '对照按新标识匹配抄本');
+    assert.strictEqual(impDiff.groupDiff.counts.paired, 3, '底本位置一一对应仍可配对');
+    assert.ok(
+      impDiff.textChanges.some((t: any) => t.msName === '甲本' && t.lineNo === 1 && t.status === 'changed'),
+      '行文差异照常呈现'
+    );
+    // 旧版仍可恢复：待修复组被快照状态整体重建
+    impView = (await call(base, 'GET', `/documents/${dImp}`)).json;
+    r = await call(base, 'POST', `/documents/${dImp}/editions/1/restore`, { expectedVersion: impView.document.version });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+    assert.strictEqual(r.json.version, impView.document.version + 1, '恢复只推进一次版本');
+    impView = (await call(base, 'GET', `/documents/${dImp}`)).json;
+    assert.strictEqual(impView.stats.brokenCount, 0, '恢复后无待修复');
+    assert.strictEqual(impLines(impA.id)[0].content, '天命之謂性率性之謂道');
+    const impDiff2 = (await call(base, 'GET', `/documents/${dImp}/editions/1/diff`)).json;
+    assert.strictEqual(impDiff2.textChanges.length, 0, '恢复后与第 1 版完全一致');
+    assert.strictEqual(impDiff2.groupDiff.counts.pairedChanged, 0);
+    // 导入不改动源文献
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    assert.strictEqual(arcView.document.version, arcVersion, '源文献版本不变');
+    assert.strictEqual(arcView.stats.brokenCount, 2, '源文献待修复状态不变');
+    assert.strictEqual((await call(base, 'GET', `/documents/${dArc}/editions`)).json.editions.length, 1);
+    // 新文献仍可编辑并按现有门禁发布
+    impView = (await call(base, 'GET', `/documents/${dImp}`)).json;
+    r = await call(base, 'POST', `/manuscripts/${impB.id}/lines`, { expectedVersion: impView.document.version, content: '附加一行' });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+    impView = (await call(base, 'GET', `/documents/${dImp}`)).json;
+    r = await call(base, 'POST', `/documents/${dImp}/publish`, { expectedVersion: impView.document.version });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+    assert.strictEqual(r.json.editionNo, 2, '在导入文献上继续编号发布');
+
+    // ---- 同一文件重复导入：各自创建独立文献 ----
+    r = await call(base, 'POST', '/documents/import', arc);
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+    const dImp2 = r.json.documentId;
+    assert.ok(dImp2 !== dArc && dImp2 !== dImp, '重复导入各自独立');
+    let imp2View = (await call(base, 'GET', `/documents/${dImp2}`)).json;
+    // 导入文献上的现有门禁：待修复组未修复前不得发布
+    r = await call(base, 'POST', `/documents/${dImp2}/publish`, { expectedVersion: imp2View.document.version });
+    await expectFail(r, 409, '待修复');
+    r = await call(base, 'POST', `/documents/${dImp2}/manuscripts`, { expectedVersion: imp2View.document.version, name: '丁本' });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+    impView = (await call(base, 'GET', `/documents/${dImp}`)).json;
+    assert.strictEqual(impView.manuscripts.length, 3, '另一导入副本不受影响');
+
+    // ---- 多发布版归档：导出含 2 版的文献再导入，两个快照都可阅读、对照、恢复 ----
+    const arcTwoEd = (await call(base, 'GET', `/documents/${dImp}/archive`)).json;
+    assert.strictEqual(arcTwoEd.editions.length, 2);
+    assert.strictEqual(arcTwoEd.document.publishedVer, 2);
+    r = await call(base, 'POST', '/documents/import', arcTwoEd);
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+    const dImp3 = r.json.documentId;
+    let imp3View = (await call(base, 'GET', `/documents/${dImp3}`)).json;
+    assert.strictEqual(imp3View.document.publishedVer, 2);
+    assert.strictEqual((await call(base, 'GET', `/documents/${dImp3}/editions`)).json.editions.length, 2);
+    r = await call(base, 'POST', `/documents/${dImp3}/editions/2/restore`, { expectedVersion: imp3View.document.version });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+    imp3View = (await call(base, 'GET', `/documents/${dImp3}`)).json;
+    r = await call(base, 'POST', `/documents/${dImp3}/editions/1/restore`, { expectedVersion: imp3View.document.version });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+    imp3View = (await call(base, 'GET', `/documents/${dImp3}`)).json;
+    assert.strictEqual(imp3View.stats.brokenCount, 0);
+    assert.strictEqual(imp3View.rawByMs.find((x: any) => x.msId === imp3View.manuscripts[1].id).lines.length, 2, '第 1 版尚无后增行');
+
+    // ---- 历史快照含工作版已删除的抄本：导入保留全新标识，恢复时可物化 ----
+    const ghostArc = JSON.parse(JSON.stringify(arc));
+    ghostArc.editions[0].snapshot.manuscripts.push({ id: 987654, name: '丁本', position: 4, isBase: false });
+    ghostArc.editions[0].snapshot.rawByMs.push({ msId: 987654, lines: [] });
+    r = await call(base, 'POST', '/documents/import', ghostArc);
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+    const dGhost = r.json.documentId;
+    let ghostView = (await call(base, 'GET', `/documents/${dGhost}`)).json;
+    assert.strictEqual(ghostView.manuscripts.length, 3, '工作版不含快照独有抄本');
+    r = await call(base, 'POST', `/documents/${dGhost}/editions/1/restore`, { expectedVersion: ghostView.document.version });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+    ghostView = (await call(base, 'GET', `/documents/${dGhost}`)).json;
+    assert.strictEqual(ghostView.manuscripts.length, 4, '恢复快照后该抄本物化');
+    const ghostMs = ghostView.manuscripts.find((m: any) => m.name === '丁本');
+    assert.ok(ghostMs, '快照独有抄本已物化');
+    assert.notStrictEqual(ghostMs.id, 987654, '物化抄本使用重建后的新标识');
+
+    // ---- 正向变体：空组列表、待修复组缺底本片段均可导入 ----
+    const noGroupsArc = JSON.parse(JSON.stringify(arc));
+    noGroupsArc.groups = [];
+    r = await call(base, 'POST', '/documents/import', noGroupsArc);
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json));
+    assert.strictEqual(r.json.imported.groupCount, 0);
+    const noBaseBrokenArc = JSON.parse(JSON.stringify(arc));
+    noBaseBrokenArc.groups[0].fragments = noBaseBrokenArc.groups[0].fragments.filter((f: any) => f.msRef !== arcA.id);
+    r = await call(base, 'POST', '/documents/import', noBaseBrokenArc);
+    assert.strictEqual(r.status, 201, `待修复组可缺底本片段：${JSON.stringify(r.json)}`);
+    assert.strictEqual(r.json.imported.brokenGroupCount, 2);
+
+    // ---- 导入校验：未知格式 / 缺失引用 / 损坏快照 / 完好组非法区间等逐条定位、整次拒绝 ----
+    const docsCount = async () => (await call(base, 'GET', '/documents')).json.documents.length;
+    const arcClone = () => JSON.parse(JSON.stringify(arc));
+    const expectImportFail = async (mutated: unknown, phrase: string, code?: string) => {
+      const before = await docsCount();
+      const rr = await call(base, 'POST', '/documents/import', mutated);
+      await expectFail(rr, 400, phrase);
+      assert.strictEqual(rr.json.details.code, 'ARCHIVE_INVALID', '统一错误代码');
+      if (code) {
+        assert.ok(
+          rr.json.details.issues.some((it: any) => it.code === code),
+          `issues 应含 ${code}：${JSON.stringify(rr.json.details)}`
+        );
+      }
+      assert.strictEqual(await docsCount(), before, '整次拒绝：不得创建任何文献');
+      return rr;
+    };
+
+    // 未知格式 / 格式版本 / 非对象
+    await expectImportFail([], 'JSON 对象', 'UNKNOWN_FORMAT');
+    await expectImportFail({ ...arcClone(), format: 'other-format' }, '未知归档格式', 'UNKNOWN_FORMAT');
+    await expectImportFail({ ...arcClone(), formatVersion: 99 }, '格式版本', 'UNKNOWN_FORMAT_VERSION');
+    // 元信息缺失
+    await expectImportFail((() => { const x = arcClone(); delete x.document; return x; })(), 'document.title', 'BAD_SHAPE');
+    // 底本引用缺失
+    await expectImportFail((() => { const x = arcClone(); x.document.baseMsRef = 999999; return x; })(), '底本', 'NO_BASE');
+    // 抄本：重名 / 顺序不连续
+    await expectImportFail((() => { const x = arcClone(); x.manuscripts[1].name = '甲本'; return x; })(), '重复', 'DUP_MS');
+    await expectImportFail((() => { const x = arcClone(); x.manuscripts[2].position = 9; return x; })(), 'position', 'BAD_POSITION');
+    // 行：引用不存在的抄本 / 行号不连续
+    await expectImportFail((() => { const x = arcClone(); x.lines[0].msRef = 999999; return x; })(), '缺失引用', 'BAD_MS_REF');
+    await expectImportFail(
+      (() => { const x = arcClone(); x.lines.find((l: any) => l.msRef === arcA.id && l.lineNo === 2).lineNo = 3; return x; })(),
+      '行号不连续',
+      'LINE_NO_GAP'
+    );
+    // 片段悬空引用：抄本 / 行 / 他抄本的行
+    await expectImportFail((() => { const x = arcClone(); x.groups[0].fragments[0].msRef = 999999; return x; })(), '悬空引用', 'BAD_MS_REF');
+    await expectImportFail((() => { const x = arcClone(); x.groups[2].fragments[0].lineRef = 999999; return x; })(), '悬空引用', 'BAD_LINE_REF');
+    await expectImportFail(
+      (() => {
+        const x = arcClone();
+        x.groups[2].fragments[0].lineRef = x.lines.find((l: any) => l.msRef === arcB.id && l.lineNo === 1).ref;
+        return x;
+      })(),
+      '他抄本的行',
+      'LINE_MS_MISMATCH'
+    );
+    // 待修复组真实片段：负值 / 逆序 / 零长度 一律拒绝
+    await expectImportFail((() => { const x = arcClone(); x.groups[0].fragments[0].startCp = -1; return x; })(), '负值', 'BAD_RANGE');
+    await expectImportFail(
+      (() => { const x = arcClone(); x.groups[0].fragments[0].startCp = 3; x.groups[0].fragments[0].endCp = 2; return x; })(),
+      '逆序',
+      'BAD_RANGE'
+    );
+    await expectImportFail(
+      (() => { const x = arcClone(); x.groups[0].fragments[0].startCp = 2; x.groups[0].fragments[0].endCp = 2; return x; })(),
+      '零长度',
+      'BAD_RANGE'
+    );
+    // 完好组非法区间：越界 / 重叠 / 缺底本（按现行归组规则拒绝）
+    await expectImportFail((() => { const x = arcClone(); x.groups[2].fragments[0].endCp = 99; return x; })(), '越界', 'OUT_OF_RANGE');
+    await expectImportFail(
+      (() => {
+        const x = arcClone();
+        x.groups[0].broken = false;
+        x.groups[1].broken = false;
+        const g2b = x.groups[1].fragments.find((f: any) => f.msRef === arcA.id);
+        g2b.startCp = 0; g2b.endCp = 5; // 与组1 底本 [0,5) 重叠
+        return x;
+      })(),
+      '重叠归组',
+      'OVERLAP'
+    );
+    await expectImportFail(
+      (() => { const x = arcClone(); x.groups[2].fragments = x.groups[2].fragments.filter((f: any) => f.msRef !== arcA.id); return x; })(),
+      '缺少底本片段',
+      'NO_BASE'
+    );
+    // 组：空组 / 组序重复 / 组序缺号
+    await expectImportFail((() => { const x = arcClone(); x.groups[2].fragments = []; return x; })(), '没有任何片段', 'EMPTY_GROUP');
+    await expectImportFail((() => { const x = arcClone(); x.groups[1].ord = 1; return x; })(), '重复', 'DUP_ORD');
+    await expectImportFail((() => { const x = arcClone(); x.groups[2].ord = 5; return x; })(), '连续', 'ORD_GAP');
+    // 发布版：编号缺号 / 与 publishedVer 不一致 / 快照损坏（逐条定位到版号）
+    await expectImportFail((() => { const x = arcClone(); x.editions[0].editionNo = 2; return x; })(), '自 1 起连续', 'EDITION_NO_GAP');
+    await expectImportFail((() => { const x = arcClone(); x.document.publishedVer = 0; return x; })(), '不一致', 'PUBLISHED_VER_MISMATCH');
+    {
+      const x = arcClone();
+      x.editions[0].snapshot.groups[0].cells.find((c: any) => c.msId === arcA.id).endCp = 99;
+      const rr = await expectImportFail(x, '快照', 'SNAPSHOT_OUT_OF_RANGE');
+      assert.ok(
+        rr.json.details.issues.some((it: any) => it.editionNo === 1),
+        '快照问题须定位到发布版编号'
+      );
+    }
+    // 全部拒绝后源文献依旧不变
+    arcView = (await call(base, 'GET', `/documents/${dArc}`)).json;
+    assert.strictEqual(arcView.document.version, arcVersion, '失败导入不触及源文献');
+
     console.log('✅ 全部集成测试通过');
   } finally {
     await close();

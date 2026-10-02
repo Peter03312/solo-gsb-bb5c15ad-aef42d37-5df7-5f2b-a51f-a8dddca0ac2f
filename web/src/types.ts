@@ -415,3 +415,48 @@ export interface RestoreResult {
     baseMsId: number;
   };
 }
+
+// ---- 文献归档（导出 / 导入） ----
+
+export interface CollationArchive {
+  format: string;
+  formatVersion: number;
+  exportedAt: string;
+  document: {
+    title: string;
+    version: number;
+    publishedVer: number;
+    baseMsRef: number | null;
+  };
+  manuscripts: Array<{ ref: number; name: string; position: number }>;
+  lines: Array<{ ref: number; msRef: number; lineNo: number; content: string }>;
+  groups: Array<{
+    ord: number;
+    broken: boolean;
+    fragments: Array<{
+      msRef: number;
+      missing: boolean;
+      lineRef: number | null;
+      startCp: number | null;
+      endCp: number | null;
+    }>;
+  }>;
+  editions: Array<{ editionNo: number; createdAt: string | null; snapshot: unknown }>;
+}
+
+export interface ImportArchiveResult {
+  ok: boolean;
+  documentId: number;
+  title: string;
+  version: number;
+  publishedVer: number;
+  imported: {
+    manuscriptCount: number;
+    lineCount: number;
+    groupCount: number;
+    brokenGroupCount: number;
+    fragmentCount: number;
+    missingCount: number;
+    editionCount: number;
+  };
+}

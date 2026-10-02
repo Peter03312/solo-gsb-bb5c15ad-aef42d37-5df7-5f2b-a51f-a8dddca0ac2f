@@ -11,7 +11,8 @@ const routes_1 = require("./routes");
 const util_1 = require("./util");
 function createApp() {
     const app = (0, express_1.default)();
-    app.use(express_1.default.json({ limit: '4mb' }));
+    // 归档导入的体积上限放宽（归档含全部已发布版快照，远大于普通写请求）
+    app.use(express_1.default.json({ limit: '16mb' }));
     app.use('/api', routes_1.router);
     app.get('/api/health', (_req, res) => res.json({ ok: true }));
     // 生产环境：托管前端构建产物（SPA）

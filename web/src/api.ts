@@ -108,16 +108,21 @@ export const api = {
       edits,
       basis,
     }),
+  exportArchive: (id: number) => req<CollationArchive>('GET', `/api/documents/${id}/archive`),
+  importArchive: (archive: unknown) =>
+    req<ImportArchiveResult>('POST', '/api/documents/import', archive),
 };
 
 import type {
   BatchEditItem,
   BatchEditPreview,
   BatchEditResult,
+  CollationArchive,
   CollationView,
   DocumentSummary,
   EditionDiff,
   EditionSummary,
+  ImportArchiveResult,
   ReLineBasis,
   ReLinePreview,
   ReLineResult,

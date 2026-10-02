@@ -11,6 +11,7 @@ import {
 import { applyReLinePlan, buildReLinePlan } from './reline';
 import { applyBatchEditPlan, buildPlanForEdits } from './batchedit';
 import { applyRestore, buildRestorePlan } from './restore';
+import { applyArchive, buildArchive, validateArchive } from './archive';
 import { charLen, HttpError, isInt, sliceCp } from './util';
 import {
   bumpVersion,
@@ -87,6 +88,51 @@ router.get(
     const id = Number(req.params.id);
     const view = await withTx(async (c) => buildView(c, await getDoc(c, id)));
     res.json(view);
+  })
+);
+
+// ---------- 文献归档（导出 / 导入） ----------
+
+/**
+ * 导出可迁移归档（只读，不推进版本）：
+ *   GET /api/documents/:id/archive
+ * 在单个 SERIALIZABLE 事务内读取文献全部状态，归档对应同一已提交版本
+ * （document.version 即该工作版版本号）。内容含：标题、抄本及行序、底本、
+ * 当前对应组的片段、缺文与待修复状态、工作版版本号、全部已发布版快照，
+ * 并带格式版本（format / formatVersion）。响应带 Content-Disposition 便于直接下载。
+ */
+router.get(
+  '/documents/:id/archive',
+  wrap(async (req, res) => {
+    const id = Number(req.params.id);
+    const archive = await withTx(async (c) => buildArchive(c, await getDoc(c, id)));
+    const fallback = `collation-archive-doc${id}-v${archive.document.version}.json`;
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(
+        `${archive.document.title}-v${archive.document.version}.collation.json`
+      )}`
+    );
+    res.json(archive);
+  })
+);
+
+/**
+ * 导入归档为一篇新文献：
+ *   POST /api/documents/import   （请求体即归档 JSON）
+ * 单次事务内先校验后写入，任一处不合法即整次回滚（不创建任何文献）：
+ * 未知格式 / 缺失引用 / 损坏快照 / 完好组非法区间 → 400，
+ * details.code=ARCHIVE_INVALID，details.issues[] 逐条给出位置与原因。
+ * 成功 → 201：全部内部标识重建，源文献不受影响；同一文件重复导入各自独立。
+ */
+router.post(
+  '/documents/import',
+  wrap(async (req, res) => {
+    const result = await withTx(async (c) => {
+      const plan = validateArchive(req.body);
+      return applyArchive(c, plan);
+    });
+    res.status(201).json({ ok: true, ...result });
   })
 );
 

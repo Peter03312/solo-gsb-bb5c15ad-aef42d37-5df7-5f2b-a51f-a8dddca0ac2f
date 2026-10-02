@@ -7,20 +7,23 @@ import { SupplementTab } from './SupplementTab';
 import { BatchEditTab } from './BatchEditTab';
 import { CollationPage } from './CollationPage';
 import { PublishTab } from './PublishTab';
+import { ArchiveTab } from './ArchiveTab';
 import { ErrorBox } from '../ErrorBox';
 
-type Tab = 'transcribe' | 'group' | 'supplement' | 'batchedit' | 'collation' | 'publish';
+type Tab = 'transcribe' | 'group' | 'supplement' | 'batchedit' | 'collation' | 'publish' | 'archive';
 
 export function Workspace({
   docId,
   onHome,
   onOpenEdition,
   onOpenDiff,
+  onOpenDocument,
 }: {
   docId: number;
   onHome: () => void;
   onOpenEdition: (no: number) => void;
   onOpenDiff: (no: number) => void;
+  onOpenDocument: (id: number) => void;
 }) {
   const [view, setView] = useState<CollationView | null>(null);
   const [tab, setTab] = useState<Tab>('transcribe');
@@ -107,6 +110,9 @@ export function Workspace({
           <button className={tab === 'publish' ? 'active' : ''} onClick={() => setTab('publish')}>
             发布与旧版
           </button>
+          <button className={tab === 'archive' ? 'active' : ''} onClick={() => setTab('archive')}>
+            归档
+          </button>
         </div>
 
         {tab === 'transcribe' && (
@@ -132,6 +138,9 @@ export function Workspace({
             onError={raise}
             onNotice={flash}
           />
+        )}
+        {tab === 'archive' && (
+          <ArchiveTab view={view} onError={raise} onNotice={flash} onOpenDocument={onOpenDocument} />
         )}
       </div>
     </div>

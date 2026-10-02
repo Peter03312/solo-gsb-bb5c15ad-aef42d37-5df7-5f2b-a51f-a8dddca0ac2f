@@ -6,7 +6,8 @@ import { HttpError } from './util';
 
 export function createApp() {
   const app = express();
-  app.use(express.json({ limit: '4mb' }));
+  // 归档导入的体积上限放宽（归档含全部已发布版快照，远大于普通写请求）
+  app.use(express.json({ limit: '16mb' }));
 
   app.use('/api', router);
   app.get('/api/health', (_req, res) => res.json({ ok: true }));

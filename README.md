@@ -354,6 +354,80 @@ curl -X POST http://localhost:4000/api/documents/1/editions/1/restore \
 }
 ```
 
+### 文献归档（导出 / 导入为另一篇文献）
+整理者可在工作区「归档」页签（也可直接调 HTTP API）把一篇文献**下载为可迁移归档**，
+并把该归档**导入为另一篇独立文献**（跨环境迁移 / 备份 / 复制工作底本）。
+
+- **导出（只读，不推进版本）**：在单个 SERIALIZABLE 事务内读取文献全部状态，
+  归档对应**同一已提交版本**（`document.version` 即该工作版版本号）；未改动时重复导出内容逐字节一致。
+  归档为单个 JSON 文件，带格式标识与格式版本（`format="collation-archive"`、`formatVersion=1`），内含：
+  - 标题、工作版版本号、已发布版序号、**底本**引用；
+  - **抄本及顺序**、全部**原始行**（含行序与文字）；
+  - **当前对应组**（组序、**待修复状态**、各抄本片段坐标与**缺文标记**；
+    待修复组的越界坐标原样保留）；
+  - **全部已发布版快照**（编号、发布时间、快照本体）。
+  归档内的 id 均为「归档局部引用」（导出时取源库 id），导入时全部重建，与任何现存文献互不干扰。
+- **导入（单次事务，先校验后写入，任一处不合法即整次回滚、不创建任何文献）**：
+  - **未知格式 / 格式版本不符** → 400 拒绝；
+  - **当前完好组**按**现行归组规则**全量校验（与整批保存同一套：底本唯一、
+    每抄本每组至多一片、不行内重叠、不越界、组序自 1 连续）；
+  - **待修复组**可保留原有**越界坐标**，但其真实片段不得有**负值、逆序、零长度或悬空引用**
+    （引用不存在的抄本 / 行，或引用他抄本的行）；
+  - **每个已发布版快照均须能构成合法归组**（与「恢复已发布校勘版」同一套快照校验）；
+  - 发布版编号须自 1 连续且与 `publishedVer` 一致；
+  - 全部问题以 `details.code=ARCHIVE_INVALID`、`details.issues[]` **逐条给出位置与原因**
+    （section / 发布版号 / 组序 / 抄本名 / 行号），整次拒绝。
+- **重建内部标识及关联**：新文献的文献 / 抄本 / 行 / 组 / 片段全部取得新 id；
+  快照内的抄本引用同步重建为新标识（历史快照独有、工作版已删除的抄本为其保留全新空闲标识，
+  恢复该版时可物化而不与任何文献冲突）。工作版版本号与已发布版序号按归档落库。
+- **导入成功不改动源文献**；新文献的旧版仍可**阅读、对照、恢复**，工作版仍可编辑、
+  修复、行界调整、补配并按现有门禁**继续编号发布**；**同一文件重复导入各自创建独立文献**。
+- 工作区「归档」页签展示导入结果（新文献编号与各项计数，可一键打开新文献）及逐条错误原因。
+
+接口：
+
+```bash
+# 导出（响应即归档 JSON，带 Content-Disposition 便于直接下载）
+curl -OJ http://localhost:4000/api/documents/1/archive
+
+# 导入（请求体即归档文件内容）
+curl -X POST http://localhost:4000/api/documents/import \
+  -H 'Content-Type: application/json' \
+  --data-binary @中庸·首章-v12.collation.json
+```
+
+导入成功返回 `201`：
+
+```json
+{
+  "ok": true,
+  "documentId": 5,
+  "title": "中庸·首章",
+  "version": 12,
+  "publishedVer": 2,
+  "imported": {
+    "manuscriptCount": 3, "lineCount": 6, "groupCount": 4,
+    "brokenGroupCount": 1, "fragmentCount": 10, "missingCount": 2,
+    "editionCount": 2
+  }
+}
+```
+
+校验失败返回 `400`（无任何写入）：
+
+```json
+{
+  "error": "归档校验失败：共 1 处问题，已整次拒绝、未导入任何内容",
+  "details": {
+    "code": "ARCHIVE_INVALID",
+    "issues": [
+      { "code": "OUT_OF_RANGE", "section": "groups", "groupOrd": 1, "msName": "乙本", "lineNo": 1,
+        "message": "完好组非法：第 1 组「乙本」越界：该行共 10 字，片段位于第 1 行第 6–99 字；合法范围为第 1–10 字" }
+    ]
+  }
+}
+```
+
 
 ### 并发控制
 - 所有写请求必须携带 `expectedVersion`（乐观锁）；
@@ -386,6 +460,8 @@ curl -X POST http://localhost:4000/api/documents/1/editions/1/restore \
 | GET | `/api/documents/:id/editions` / `…/editions/:no` | 版本列表 / 阅读旧版快照 |
 | GET | `/api/documents/:id/editions/:no/diff` | **该已发布版与当前工作版的版本对照**（旧版不存在 → 404） |
 | POST | `/api/documents/:id/editions/:no/restore` | **确认恢复为该已发布版**（整体重建抄本/底本/行/组片段/缺文；版本过期 409、版不存在 404、快照不合法 409 `RESTORE_SNAPSHOT_INVALID`，皆不改动数据；成功只推进一次版本） |
+| GET | `/api/documents/:id/archive` | **导出可迁移归档**（只读，同一已提交版本；含标题/抄本及行序/底本/当前组片段/缺文与待修复/工作版版本号/全部已发布版快照，带格式版本） |
+| POST | `/api/documents/import` | **导入归档为另一篇文献**（单次事务校验并重建全部内部标识；未知格式/缺失引用/损坏快照/完好组非法区间 → 400 `ARCHIVE_INVALID` 逐条定位、整次拒绝；源文献不受影响，重复导入各自独立） |
 
 写请求体均含 `expectedVersion`；错误响应：`{ "error": "...", "details": [ { "code", "message", "groupOrd", "msName", "lineNo", ... } ] }`。
 
@@ -428,7 +504,15 @@ npm test
 非法区间/跨文献行整批报错定位（BAD_RANGE/OVERLAPPING_RANGES/DUPLICATE_INSERTION/
 INSERTION_POINT_IN_INTERVAL/LINE_NOT_IN_DOC/BAD_SHAPE）、非零长编辑端点相接允许、
 行或文献不存在 404、缺 basis 400、过期版本 409 与 basis 不符 409（BATCH_EDIT_STALE）皆整批拒绝不写入不推进、
-成功只推进一次版本、已发布快照保持原样、扩展 B 区生僻字按码点替换**。
+成功只推进一次版本、已发布快照保持原样、扩展 B 区生僻字按码点替换**，以及
+**文献归档：导出含格式版本/标题/抄本及行序/底本/当前组片段/缺文与待修复/工作版版本号/全部已发布版快照、
+导出只读不推进版本、未改动重复导出内容一致、导入重建全部内部标识（抄本/行/组/快照引用）、
+待修复组越界坐标与缺文状态保留、导入文献旧版可阅读/对照/恢复、可继续编辑与按门禁编号发布、
+多发布版归档逐版可恢复、历史快照独有抄本以新标识物化、同一文件重复导入各自独立、
+导入不改动源文献、空组列表与缺底本待修复组可导入、
+未知格式/格式版本/非对象/元信息缺失/底本引用缺失/抄本重名/顺序不连续/行引用缺失/行号不连续/
+片段悬空引用（抄本/行/他抄本的行）/待修复组负值/逆序/零长度/完好组越界/重叠/缺底本/
+空组/组序重复缺号/发布版编号缺号/publishedVer 不符/快照损坏逐条定位（ARCHIVE_INVALID）并整次拒绝不创建文献**。
 
 ---
 
@@ -440,7 +524,7 @@ INSERTION_POINT_IN_INTERVAL/LINE_NOT_IN_DOC/BAD_SHAPE）、非零长编辑端点
 ├── docker-compose.yml        # 一键：db(PostgreSQL 16) + app
 ├── db/schema.sql             # 数据库结构（幂等，可重复执行）
 ├── server/                   # Node.js + TypeScript + Express
-│   └── src/ (db/validate/collation/diff/supplement/reline/restore/routes/repo/...)
+│   └── src/ (db/validate/collation/diff/supplement/reline/restore/archive/routes/repo/...)
 └── web/                      # React 18 + Vite + TypeScript
-    └── src/ (录文 / 归组 / 对照 / 发布与旧版 / 版本对照)
+    └── src/ (录文 / 归组 / 对照 / 发布与旧版 / 版本对照 / 归档)
 ```

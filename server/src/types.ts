@@ -317,6 +317,62 @@ export interface CollationView {
   };
 }
 
+// ---- 文献归档（导出为可迁移文件 / 导入为另一篇文献）----
+
+/**
+ * 可迁移归档格式（format="collation-archive"，formatVersion=1）。
+ * 归档内的 id 均为「归档局部引用」（导出时取源库 id），导入时全部重建为新标识，
+ * 与任何现存文献互不干扰；同一文件可重复导入，各自生成独立文献。
+ */
+export interface ArchiveManuscript {
+  ref: number;                // 抄本引用（归档局部）
+  name: string;
+  position: number;           // 展示次序（自 1 连续）
+}
+
+export interface ArchiveLine {
+  ref: number;                // 行引用（归档局部）
+  msRef: number;              // 所属抄本引用
+  lineNo: number;             // 该抄本内原始行号（自 1 连续）
+  content: string;
+}
+
+export interface ArchiveFragment {
+  msRef: number;
+  missing: boolean;           // 显式缺文标记（不依附行）
+  lineRef: number | null;     // 真实片段：行引用；缺文时为 null
+  startCp: number | null;     // Unicode 码点偏移（左闭）
+  endCp: number | null;       // 右开；待修复组可保留越界坐标
+}
+
+export interface ArchiveGroup {
+  ord: number;                // 底本顺序（自 1 连续）
+  broken: boolean;            // 待修复状态
+  fragments: ArchiveFragment[];
+}
+
+export interface ArchiveEdition {
+  editionNo: number;          // 发布版编号（自 1 连续）
+  createdAt: string | null;   // 发布时间（ISO）
+  snapshot: unknown;          // 发布定稿快照（CollationView）
+}
+
+export interface CollationArchive {
+  format: string;             // 固定 "collation-archive"
+  formatVersion: number;      // 当前为 1
+  exportedAt: string;         // 导出时刻（ISO，仅元信息）
+  document: {
+    title: string;
+    version: number;          // 导出时工作版版本号（同一已提交版本的一致性读）
+    publishedVer: number;     // 已发布版序号
+    baseMsRef: number | null; // 底本抄本引用
+  };
+  manuscripts: ArchiveManuscript[];
+  lines: ArchiveLine[];
+  groups: ArchiveGroup[];
+  editions: ArchiveEdition[];
+}
+
 // ---- 版本对照（任一已发布校勘版 vs 当前工作版）----
 
 export interface DiffSideInfo {
